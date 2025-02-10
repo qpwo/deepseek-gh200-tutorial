@@ -1,19 +1,19 @@
 # Serving deepseek v3 and r1 on GH200s
 
+Lambda labs has half-off GH200s right now to get more people used to the ARM tooling. This means you can maybe actually afford to run the biggest open-source models! The only caveat is that you'll have to occasionally build something from source. Here's how I got llama 405b running with full precision on the GH200s.
+
 ### Create instances
 
 Make [one instance](https://cloud.lambdalabs.com/instances) and note the name of your ssh key and your shared filesystem.
 
 ```sh
-export ssh_key_name=my-key
+export sshkey_name=my-key
 export shared_fs_name=shared
 ```
 
 We'll use the API to make the rest. You'll need an [api key](https://cloud.lambdalabs.com/api-keys).
 
 ```sh
-sudo apt-get install -y jq
-
 export LAMBDA_API_KEY="..."
 
 function lambda-api {
@@ -30,7 +30,7 @@ while [[ $num_got -lt $num_want ]]; do
     lambda-api POST instance-operations/launch -d '{
         "region_name": "us-east-3",
         "instance_type_name": "gpu_1x_gh200",
-        "ssh_key_names": ["'$ssh_key_name'"],
+        "sshkey_names": ["'$sshkey_name'"],
         "file_system_names": ["'$shared_fs_name'"],
         "quantity": 1,
         "name": "node_'$num_got'"
@@ -40,15 +40,9 @@ while [[ $num_got -lt $num_want ]]; do
 done
 ```
 
-Lambda labs has half-off GH200s right now to get more people used to the ARM tooling. This means you can maybe actually afford to run the biggest open-source models! The only caveat is that you'll have to occasionally build something from source. Here's how I got llama 405b running with full precision on the GH200s.
+After all the instances are created, copy all the IP addresses and save it to `~/ips.txt`.
 
-### Create instances
-
-Llama 405b is about 750GB so you want about 10 96GB GPUS to run it. (The GH200 has pretty good CPU-GPU memory swapping speed -- that's kind of the whole point of the GH200 -- so you can use as few as 3. Time-per-token will be terrible, but total throughput is acceptable, if you're doing batch-processing.) Sign in to lambda labs and create a bunch of GH200 instances. **Make sure to give them all the same shared network filesystem.**
-
-![lambda labs screenshot](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/sjhtn33f1abnha6ng50c.png)
-
-Save the ip addresses to ~/ips.txt.
+![copy-ips](shot1.png)
 
 ### Bulk ssh connection helpers
 
@@ -61,34 +55,38 @@ for ip in $(cat ~/ips.txt); do
     ssh-keyscan $ip >> ~/.ssh/known_hosts
 done
 
-function run_ip() {
-    ssh -i ~/.ssh/lambda_id_ed25519 ubuntu@$ip -- stdbuf -oL -eL bash -l -c "$(printf "%q" "$*")" < /dev/null
+export runprefix=""
+function runip() {
+    ssh -i ~/.ssh/lambda_id_ed25519 ubuntu@$ip -- stdbuf -oL -eL bash -l -c "$(printf "%q" "$runprefix""$*")" < /dev/null
 }
-function run_k() { ip=$(sed -n "$k"p ~/ips.txt) run_ip "$@"; }
-function runhead() { ip="$(head -n1 ~/ips.txt)" run_ip "$@"; }
-
-function run_ips() {
+function runk() { ip=$(sed -n "$((k + 1))"p ~/ips.txt) runip "$@"; }
+function runhead() { ip="$(head -n1 ~/ips.txt)" runip "$@"; }
+function runips() {
+    local pids=()
     for ip in $ips; do
-        ip=$ip run_ip "$@" |& sed "s/^/$ip\t /" &
-        # pids="$pids $!"
+        ip=$ip runip "$@" |& sed "s/^/$ip\t /" &
+        pids+=($!)
     done
-    wait &> /dev/null
+    wait "${pids[@]}" &>/dev/null
 }
-function runall() { ips="$(cat ~/ips.txt)" run_ips "$@"; }
-function runrest() { ips="$(tail -n+2 ~/ips.txt)" run_ips "$@"; }
+function runall() { ips="$(cat ~/ips.txt)" runips "$@"; }
+function runrest() { ips="$(tail -n+2 ~/ips.txt)" runips "$@"; }
 
-function ssh_k() {
-    ip=$(sed -n "$k"p ~/ips.txt)
+function sshk() {
+    ip=$(sed -n "$((k + 1))"p ~/ips.txt)
     ssh -i ~/.ssh/lambda_id_ed25519 ubuntu@$ip
 }
-alias ssh_head='k=1 ssh_k'
+alias ssh_head='k=0 sshk'
 
 function killall() {
-    pkill -ife '.ssh/lambda_id_ed25519'
-    sleep 1
-    pkill -ife -9 '.ssh/lambda_id_ed25519'
-    while [[ -n "$(jobs -p)" ]]; do fg || true; done
+    pkill -ife 192.222
 }
+```
+
+Let's check that it works
+
+```sh
+runall echo ok
 ```
 
 ### Set up NFS cache
@@ -131,9 +129,28 @@ runall dd if=shared/bigfile of=/dev/null bs=1M # First one takes 8 seconds
 runall dd if=shared/bigfile of=/dev/null bs=1M # Seond takes 0.6 seconds
 ```
 
-### Create conda environment
+### Install python 3.11
 
-Instead of carefully doing the exact same commands on every machine, we can use a conda environment in the NFS and just control it with the head node.
+I've had better luck with `apt` packages than `conda` ones, so I'll use `apt` in this tutorial.
+
+```sh
+runall sudo add-apt-repository ppa:deadsnakes/ppa -y
+runall sudo apt-get install -y python3.11 python3.11-dev python3.11-venv python3.11-distutils
+runall python3.11 --version
+```
+
+### Create virtualenv
+
+Instead of carefully doing the exact same commands on every machine, we can use a virtual environment in the NFS and just control it with the head node. This makes it a lot easier to correct mistakes.
+
+```sh
+runhead python3.11 -m venv --copies ~/shared/myvenv
+runhead 'source ~/shared/myvenv/bin/activate; which python'
+export runprefix='source ~/shared/myvenv/bin/activate && ' # this is used by runip()
+runall which python
+```
+
+### Create conda environment
 
 ```sh
 # We'll also use a shared script instead of changing ~/.profile directly.
@@ -189,7 +206,7 @@ runhead pip install 'https://github.com/qpwo/lambda-gh200-llama-405b-tutorial/re
 #### triton from source
 
 ```sh
-k=1 ssh_k # ssh into first machine
+k=1 sshk # ssh into first machine
 
 pip install -U pip setuptools wheel ninja cmake setuptools_scm
 git config --global feature.manyFiles true # faster clones
@@ -206,7 +223,7 @@ python -c 'import triton; print("triton ok")'
 #### flash-attention from source
 
 ```sh
-k=2 ssh_k # go into second machine
+k=2 sshk # go into second machine
 
 git clone https://github.com/AlpinDale/flash-attention  ~/shared/flash-attention
 cd ~/shared/flash-attention
@@ -228,7 +245,7 @@ runhead pip install 'https://github.com/qpwo/lambda-gh200-llama-405b-tutorial/re
 #### aphrodite from source
 
 ```sh
-k=3 ssh_k # building this on the third machine
+k=3 sshk # building this on the third machine
 
 git clone https://github.com/PygmalionAI/aphrodite-engine.git ~/shared/aphrodite-engine
 cd ~/shared/aphrodite-engine
@@ -266,21 +283,21 @@ runall 'echo $HF_HUB_ENABLE_HF_TRANSFER'
 runall pkill -ife huggingface-cli # kill any stragglers
 
 for k in $(seq 1 10); do
-k=$k run_k 'bash shared/git/download.sh' &
+k=$k runk 'bash shared/git/download.sh' &
 done
 wait
 
 # we can speed up the model download by having each server download part
 local_dir=/home/ubuntu/shared/hff/405b-instruct
 for digit in $(seq 1 10); do
-k=1 run_k huggingface-cli download --max-workers=32 --revision="main" --include="[0-4]?-of-00191.safetensors" --local-dir=$local_dir meta-llama/Meta-Llama-3.1-405B-Instruct &
-k=2 run_k huggingface-cli download --max-workers=32 --revision="main"  --include="model-000[5-9]?-of-00191.safetensors" --local-dir=$local_dir meta-llama/Meta-Llama-3.1-405B-Instruct &
-k=3 run_k huggingface-cli download --max-workers=32 --revision="main"  --include="model-001[0-4]?-of-00191.safetensors" --local-dir=$local_dir meta-llama/Meta-Llama-3.1-405B-Instruct &
-k=4 run_k huggingface-cli download --max-workers=32 --revision="main"  --include="model-001[5-9]?-of-00191.safetensors" --local-dir=$local_dir meta-llama/Meta-Llama-3.1-405B-Instruct &
+k=1 runk huggingface-cli download --max-workers=32 --revision="main" --include="[0-4]?-of-00191.safetensors" --local-dir=$local_dir meta-llama/Meta-Llama-3.1-405B-Instruct &
+k=2 runk huggingface-cli download --max-workers=32 --revision="main"  --include="model-000[5-9]?-of-00191.safetensors" --local-dir=$local_dir meta-llama/Meta-Llama-3.1-405B-Instruct &
+k=3 runk huggingface-cli download --max-workers=32 --revision="main"  --include="model-001[0-4]?-of-00191.safetensors" --local-dir=$local_dir meta-llama/Meta-Llama-3.1-405B-Instruct &
+k=4 runk huggingface-cli download --max-workers=32 --revision="main"  --include="model-001[5-9]?-of-00191.safetensors" --local-dir=$local_dir meta-llama/Meta-Llama-3.1-405B-Instruct &
 
 wait
 # download misc remaining files
-k=1 run_k huggingface-cli download --max-workers=32 --revision="main" --exclude='*.pth' --local-dir=$local_dir meta-llama/Meta-Llama-3.1-405B-Instruct
+k=1 runk huggingface-cli download --max-workers=32 --revision="main" --exclude='*.pth' --local-dir=$local_dir meta-llama/Meta-Llama-3.1-405B-Instruct
 ```
 
 ### deepseek
@@ -292,7 +309,7 @@ runall curl $headip
 # node 1
 
 for k in $(seq 1 8); do
-k=$k run_k "python -m sglang.launch_server --model-path /home/ubuntu/deepseekv3 --tp 8 --dist-init-addr $headip:5000 --nnodes 8 --node-rank $((k - 1)) --trust-remote-code" &
+k=$k runk "python -m sglang.launch_server --model-path /home/ubuntu/deepseekv3 --tp 8 --dist-init-addr $headip:5000 --nnodes 8 --node-rank $((k - 1)) --trust-remote-code" &
 done
 
 # python -m sglang.launch_server --model-path /home/ubuntu/deepseekv3 --tp 10 --dist-init-addr 10.0.0.1:5000 --nnodes 2 --node-rank 1 --trust-remote-code
