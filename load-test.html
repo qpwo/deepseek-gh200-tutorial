@@ -69,9 +69,9 @@
     const client = new OpenAI({
       apiKey: 'asdf1234',  //  Keep it empty for browser-based testing.
       dangerouslyAllowBrowser: true,
-      baseURL: 'http://localhost:8000',
+      baseURL: 'http://localhost:8000/v1',
     })
-
+    window.client = client
 
     async function* runPrompt(model, prompt, maxTokens) {
       try {
