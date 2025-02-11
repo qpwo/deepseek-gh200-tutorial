@@ -5,30 +5,168 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Load test</title>
+  <style>
+    /* (Same styles as before - no changes needed here) */
+    .output-section {
+      margin-top: 10px;
+      border: 1px solid #ccc;
+      padding: 10px;
+    }
+
+    .prompt {
+      font-weight: bold;
+      margin-bottom: 5px;
+    }
+
+    .completion {
+      color: #444;
+      margin-bottom: 5px;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+
+    .summary {
+      font-style: italic;
+      color: #888;
+    }
+
+    .error {
+      color: red;
+    }
+  </style>
 </head>
 
 <body>
   <p>hello</p>
+  <div>
+    <label>
+      model:
+      <input type="text" id="model" value="dsr1" />
+    </label>
+    <label>max tokens:
+      <input type="text" id="max_tokens" value="200" />
+    </label>
+    <label>num input words:
+      <input type="text" id="num_input_words" value="10" />
+    </label>
+    <label>parallel batch sizes:
+      <input type="text" id="sizes" value="1,2,4,8,16,32,64" />
+    </label>
+    <button id="run">Run</button>
+  </div>
+  <div id="output"></div>
   <script type="module">
     import { OpenAI } from 'https://esm.sh/openai'
+    import { generate } from 'https://esm.sh/random-words'
+
+    const gel = (t) => document.getElementById(t)
+    const cel = (p, t) => {
+      const e = document.createElement(t)
+      p.appendChild(e)
+      return e
+    }
+
     const client = new OpenAI({
-      apiKey: '',
+      apiKey: '',  //  Keep it empty for browser-based testing.
       dangerouslyAllowBrowser: true,
     })
 
-    async function main() {
-      const stream = await client.chat.completions.create({
-        model: 'gpt-4o',
-        messages: [{ role: 'user', content: 'Say this is a test' }],
-        stream: true,
-      })
-      for await (const chunk of stream) {
-        console.log(chunk.choices[0]?.delta?.content || '')
+
+    async function* runPrompt(model, prompt, maxTokens) {
+      try {
+        const stream = await client.chat.completions.create({
+          model: model,
+          messages: [{ role: 'user', content: prompt }],
+          stream: true,
+          max_tokens: maxTokens, // Corrected: Use max_tokens
+        })
+        for await (const chunk of stream) {
+          yield chunk.choices[0]?.delta?.content || ''
+        }
+      } catch (error) {
+        console.error("Error in runPrompt:", error)
+        yield "Error: " + error.message // Display a user-friendly error message.
       }
     }
 
-    main();
+
+    async function processSinglePrompt(model, prompt, maxTokens, batchSection, index) {
+      const promptDiv = cel(batchSection, 'div')
+      promptDiv.classList.add('prompt')
+      promptDiv.textContent = `Prompt ${index + 1}: ${prompt}`
+
+      const completionDiv = cel(batchSection, 'div')
+      completionDiv.classList.add('completion')
+      let completionText = ""
+
+      try {
+        for await (const chunk of runPrompt(model, prompt, maxTokens)) {
+          completionText += chunk
+          completionDiv.textContent = completionText // Update live
+        }
+
+        const completionTokens = completionText.split(/\s+/).filter(Boolean).length
+        const promptTokens = prompt.split(/\s+/).filter(Boolean).length
+        return { completionTokens, promptTokens }
+
+      } catch (error) {
+        completionDiv.textContent = `Error processing prompt: ${error}`
+        completionDiv.classList.add('error')
+        console.error("Error:", error)
+        return { completionTokens: 0, promptTokens: 0 } // Return 0 tokens on error
+      }
+    }
+
+    async function processBatch(model, batchSize, numInputWords, maxTokens, outputDiv) {
+      const batchSection = cel(outputDiv, 'div')
+      batchSection.classList.add('output-section')
+      cel(batchSection, 'h3').textContent = `Batch Size: ${batchSize}`
+
+      const prompts = []
+      for (let i = 0; i < batchSize; i++) {
+        prompts.push(generate(numInputWords).join(' '))
+      }
+
+      const startTime = performance.now()
+      let totalCompletionTokens = 0
+      let totalPromptTokens = 0
+      let completedCount = 0
+
+      const promises = prompts.map((prompt, index) =>
+        processSinglePrompt(model, prompt, maxTokens, batchSection, index)
+          .then(result => {
+            totalCompletionTokens += result.completionTokens
+            totalPromptTokens += result.promptTokens
+            completedCount++
+          })
+      )
+
+
+      await Promise.all(promises)
+      const endTime = performance.now()
+      const duration = (endTime - startTime) / 1000
+
+      const summaryDiv = cel(batchSection, 'div')
+      summaryDiv.classList.add('summary')
+      summaryDiv.textContent = `Completed ${completedCount} / ${batchSize} requests in ${duration.toFixed(2)} seconds.  Total Prompt Tokens (approx): ${totalPromptTokens}, Total Completion Tokens (approx): ${totalCompletionTokens}`
+
+    }
+
+    gel('run').addEventListener('click', async () => {
+      const model = gel('model').value
+      const maxTokens = parseInt(gel('max_tokens').value, 10)
+      const numInputWords = parseInt(gel('num_input_words').value, 10)
+      const batchSizes = gel('sizes').value.split(',').map(s => parseInt(s.trim(), 10))
+      const outputDiv = gel('output')
+      outputDiv.innerHTML = '' // Clear previous results
+
+      for (const batchSize of batchSizes) {
+        await processBatch(model, batchSize, numInputWords, maxTokens, outputDiv)
+      }
+    });
+
+
   </script>
 </body>
 
-</html>l
+</html>
