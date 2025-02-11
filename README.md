@@ -25,7 +25,11 @@ function lambda-api {
     local method=$1
     local route=$2
     shift 2
-    curl --fail -q -X "$method" -H "Authorization: Bearer $LAMBDA_API_KEY" "https://cloud.lambdalabs.com/api/v1/$route" -H "Content-Type: application/json" "$@"
+    curl --fail -q -X "$method" \
+        -H "Authorization: Bearer $LAMBDA_API_KEY" \
+        "https://cloud.lambdalabs.com/api/v1/$route" \
+        -H "Content-Type: application/json" \
+        "$@"
 }
 export -f lambda-api
 
@@ -140,7 +144,8 @@ I've had better luck with `apt` packages than `conda` ones, so I'll use `apt` in
 
 ```sh
 runall sudo add-apt-repository ppa:deadsnakes/ppa -y
-runall sudo apt-get install -y python3.11 python3.11-dev python3.11-venv python3.11-distutils
+runall sudo apt-get install -y \
+    python3.11 python3.11-dev python3.11-venv python3.11-distutils
 runall python3.11 --version
 ```
 
@@ -174,39 +179,55 @@ I spent a few hours writing a script to have each server download a part of the 
 
 ## Install VLLM
 
-You can build from source if you prefer, or use my wheels.
-
-### From my wheels
+You can build from source if you prefer, or use my wheels. Either way you'll need pytorch first:
 
 ```sh
-runhead "pip install --force-reinstall 'numpy<2' torch==2.5.1 torchvision --index-url 'https://download.pytorch.org/whl/cu124'"
-
+runhead "pip install --force-reinstall \
+    'numpy<2' torch==2.5.1 torchvision \
+    --index-url 'https://download.pytorch.org/whl/cu124'"
 ```
 
-### From source
+### install everything from wheels
+
+```sh
+pip install -v 'https://github.com/qpwo/deepseek-gh200-tutorial/releases/download/v0/triton-3.1.0-cp311-cp311-linux_aarch64.whl'
+pip install -v 'https://github.com/qpwo/deepseek-gh200-tutorial/releases/download/v0/vllm-0.7.2+cu124-cp311-cp311-linux_aarch64.whl'
+```
+
+### triton from source
+
+Don't waste your time trying to configure parallel builds, ninja defaults are basically optimal.
+
+```sh
+runhead git clone https://github.com/triton-lang/triton.git ~/git/triton
+runhead "cd ~/git/triton && git checkout release/3.1.x"
+# about 5 minutes:
+runhead "cd ~/git/triton && python -m build --no-isolation --wheel --verbose ./python"
+runhead "cd ~/git/triton && pip install -v python/dist/*.whl"
+
+# It's a good idea to save the wheel for next time.
+scp -i ~/.ssh/lambda_id_ed25519 ubuntu@$(head -n1 ~/ips.txt):/home/ubuntu/git/triton/python/dist/*.whl ~/Downloads/
+```
+
+### VLLM from source
 
 ```sh
 runhead pip install ninja setuptools build setuptools_scm wheel bindings build cmake
-runhead "pip install --force-reinstall 'numpy<2' torch==2.5.1 torchvision --index-url 'https://download.pytorch.org/whl/cu124'"
-
-runhead mkdir ~/git
 runhead git clone https://github.com/vllm-project/vllm ~/git/vllm
 runhead 'cd ~/git/vllm && git checkout v0.7.2'
 # this will take about 20 minutes:
 runhead 'cd ~/git/vllm && python -m build --no-isolation --wheel --verbose .'
-runhead 'pip install -v git/vllm/dist/*.whl'
-# may have to run torch install command again
-```
+runhead 'pip install -v ~/git/vllm/dist/*.whl'
+# ((You may have to run torch install command again))
 
-Don't waste your time trying to configure parallel builds, ninja defaults are basically optimal. It's a good idea to save the wheel for next time.
-
-```sh
-scp -i ~/.ssh/lambda_id_ed25519 ubuntu@192.222.57.225:/home/ubuntu/git/vllm/dist/* ~/Downloads/
+# save the wheel for next time:
+scp -i ~/.ssh/lambda_id_ed25519 ubuntu@$(head -n1 ~/ips.txt):/home/ubuntu/git/vllm/dist/*.whl ~/Downloads/
 ```
 
 ### Check install
 
 ```sh
+runall "python -c 'import triton; print(\"triton ok\")'"
 runall "python -c 'import torch; print(torch.tensor(2).cuda() + 2)'"
 runall "vllm --help | tail -n1" # slow first time, fast second time
 ```
@@ -216,19 +237,45 @@ runall "vllm --help | tail -n1" # slow first time, fast second time
 The nodes communicate using [ray](https://docs.ray.io/en/latest/index.html), so first we'll start a ray cluster.
 
 ```sh
+runall "ray stop; pkill -ife py"
+# This will give you the private/LAN IP address you use to connect the other nodes:
 runhead ray start --head
-```
-
-This will give you the private/LAN IP address you use to connect the other nodes.
-
-```sh
-runrest ray start --address=...
+# Use the output from above:
+runrest ray start --address='...'
+runall "ray status | grep GPU" # should see "0.0/16.0 GPU" 16 times
 ```
 
 And now we can fire up vllm. The first run will cause weights to be cached in RAM, so the second time you start vllm will be faster.
 
 ```sh
-runhead vllm serve
+# 2-8 minutes to start:
+runhead 'vllm serve ~/dsr1 \
+    --api-key asdf1234 \
+    --served-model-name dsr1 \
+    --trust-remote-code \
+    --pipeline-parallel-size=4 \
+    --tensor-parallel-size=4 \
+    --enable-prefix-caching \
+    --uvicorn-log-level=info \
+    --max-num-seqs=64 \
+    --max-model-len=8000'
 ```
 
 ## Load testing
+
+I made a little browser thing where you can load-test the server. How to run it:
+
+```sh
+ssh \
+    -L 1234:localhost:1234 \
+    -L 8000:localhost:8000 \
+    -L 8265:localhost:8265 \
+    -i ~/.ssh/lambda_id_ed25519 \
+    ubuntu@$(head -n1 ~/ips.txt)
+git clone https://github.com/qpwo/deepseek-gh200-tutorial ~/git/tut
+cd ~/git/tut
+python3 -m http.server 1234
+
+# on your desktop:
+open http://localhost:1234/load-test.html
+```

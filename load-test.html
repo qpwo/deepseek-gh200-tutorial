@@ -67,8 +67,9 @@
     }
 
     const client = new OpenAI({
-      apiKey: '',  //  Keep it empty for browser-based testing.
+      apiKey: 'None',  //  Keep it empty for browser-based testing.
       dangerouslyAllowBrowser: true,
+      baseUrl: 'http://localhost:8000',
     })
 
 
@@ -98,15 +99,15 @@
       const completionDiv = cel(batchSection, 'div')
       completionDiv.classList.add('completion')
       let completionText = ""
-
+      let completionTokens = 0
+      const promptTokens = Math.floor(prompt.length / 5)
       try {
         for await (const chunk of runPrompt(model, prompt, maxTokens)) {
+          completionTokens += 1
           completionText += chunk
           completionDiv.textContent = completionText // Update live
         }
 
-        const completionTokens = completionText.split(/\s+/).filter(Boolean).length
-        const promptTokens = prompt.split(/\s+/).filter(Boolean).length
         return { completionTokens, promptTokens }
 
       } catch (error) {
@@ -124,7 +125,7 @@
 
       const prompts = []
       for (let i = 0; i < batchSize; i++) {
-        prompts.push(generate(numInputWords).join(' '))
+        prompts.push('Tell a story inspired by these words: ' + generate(numInputWords).join(' '))
       }
 
       const startTime = performance.now()
@@ -148,7 +149,15 @@
 
       const summaryDiv = cel(batchSection, 'div')
       summaryDiv.classList.add('summary')
-      summaryDiv.textContent = `Completed ${completedCount} / ${batchSize} requests in ${duration.toFixed(2)} seconds.  Total Prompt Tokens (approx): ${totalPromptTokens}, Total Completion Tokens (approx): ${totalCompletionTokens}`
+      summaryDiv.innerHTML = `
+      Completed ${completedCount} / ${batchSize} requests in ${duration.toFixed(2)} seconds.<br/>
+      Total Prompt Tokens (approx): ${totalPromptTokens} <br/>
+      Total Completion Tokens (approx): ${totalCompletionTokens} <br/>
+      Prompt rate: ${(totalPromptTokens / duration).toFixed(2)} tokens/second <br/>
+      Prompt rate per input: ${(totalPromptTokens / duration / batchSize).toFixed(2)} tokens/second <br/>
+      Completion rate: ${(totalCompletionTokens / duration).toFixed(2)} tokens/second <br/>
+      Completion rate per input: ${(totalCompletionTokens / duration / batchSize).toFixed(2)} tokens/second <br/>
+      `
 
     }
 
