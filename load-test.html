@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Load test</title>
+</head>
+
+<body>
+  <p>hello</p>
+  <script type="module">
+    import { OpenAI } from 'https://esm.sh/openai'
+    const client = new OpenAI({
+      apiKey: '',
+      dangerouslyAllowBrowser: true,
+    })
+
+    async function main() {
+      const stream = await client.chat.completions.create({
+        model: 'gpt-4o',
+        messages: [{ role: 'user', content: 'Say this is a test' }],
+        stream: true,
+      })
+      for await (const chunk of stream) {
+        console.log(chunk.choices[0]?.delta?.content || '')
+      }
+    }
+
+    main();
+  </script>
+</body>
+
+</html>l
