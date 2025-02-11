@@ -1,21 +1,26 @@
-# Serving deepseek v3 and r1 on GH200s
+# Serving deepseek r1 & v3 on GH200s
 
-Lambda labs has half-off GH200s right now to get more people used to the ARM tooling. This means you can maybe actually afford to run the biggest open-source models! The only caveat is that you'll have to occasionally build something from source. Here's how I got llama 405b running with full precision on the GH200s.
+Lambda labs still has half-off GH200s as a promotion to get more people used to the ARM tooling. I [previously](https://dev.to/qpwo/how-to-run-llama-405b-bf16-with-gh200s-7da) wrote a tutorial for running llama 405b, but deepseek r1 is clearly a better model, so let's serve it instead. There's a couple differences from serving llama:
 
-### Create instances
+- You need 12 or 16 GPUs to have decent throughput. You can still use 8 if you don't need much throughput.
+- VLLM works better than aphrodite for deepseek right now. In fact they just released an [update](https://github.com/vllm-project/vllm/releases/tag/v0.7.2) that makes deepseek inference quite a bit faster. Roughly a 40% throughput improvement.
+  - Normally a 16x 1x gpu cluster would be pretty slow for inference but for some reason this actually works pretty well.
 
-Make [one instance](https://cloud.lambdalabs.com/instances) and note the name of your ssh key and your shared filesystem.
+## Create instances
+
+This time, instead of using the website, let's use the API to make the instances.
+
+Make a [filesystem](https://cloud.lambdalabs.com/file-systems) called 'shared' in Washington, DC and write down the name of your [ssh key](https://cloud.lambdalabs.com/ssh-keys). Also generate an [api key](https://cloud.lambdalabs.com/api-keys) and save it.
 
 ```sh
 export sshkey_name=my-key
 export shared_fs_name=shared
+export LAMBDA_API_KEY="..."
 ```
 
-We'll use the API to make the rest. You'll need an [api key](https://cloud.lambdalabs.com/api-keys).
+This script will make 16 GH200 instances. Ignore the rate limit errors, it will keep retrying until 16 have been made.
 
 ```sh
-export LAMBDA_API_KEY="..."
-
 function lambda-api {
     local method=$1
     local route=$2
@@ -25,7 +30,7 @@ function lambda-api {
 export -f lambda-api
 
 num_want=16
-num_got=1
+num_got=0
 while [[ $num_got -lt $num_want ]]; do
     lambda-api POST instance-operations/launch -d '{
         "region_name": "us-east-3",
@@ -40,16 +45,16 @@ while [[ $num_got -lt $num_want ]]; do
 done
 ```
 
-After all the instances are created, copy all the IP addresses and save it to `~/ips.txt`.
+After all the instances are created, copy all the IP addresses from the [instances page](https://cloud.lambdalabs.com/instances) and save it to `~/ips.txt`.
 
 ![copy-ips](shot1.png)
 
-### Bulk ssh connection helpers
+## Bulk ssh connection helpers
 
 I prefer direct bash & ssh over anything fancy like kubernetes or slurm. It's manageable with some helpers.
 
 ```sh
-# skip fingerprint confirmation
+# save all the ssh fingerprints now to skip confirmation later
 for ip in $(cat ~/ips.txt); do
     echo "doing $ip"
     ssh-keyscan $ip >> ~/.ssh/known_hosts
@@ -89,9 +94,9 @@ Let's check that it works
 runall echo ok
 ```
 
-### Set up NFS cache
+## Set up NFS cache
 
-We'll be putting the python environment and the model weights in the NFS. It will load much faster if we cache it.
+We'll be putting the python environment in the NFS. It will load much faster if we cache it.
 
 ```sh
 # First, check the NFS works.
@@ -129,7 +134,7 @@ runall dd if=shared/bigfile of=/dev/null bs=1M # First one takes 8 seconds
 runall dd if=shared/bigfile of=/dev/null bs=1M # Seond takes 0.6 seconds
 ```
 
-### Install python 3.11
+## Install python 3.11
 
 I've had better luck with `apt` packages than `conda` ones, so I'll use `apt` in this tutorial.
 
@@ -139,260 +144,72 @@ runall sudo apt-get install -y python3.11 python3.11-dev python3.11-venv python3
 runall python3.11 --version
 ```
 
-### Create virtualenv
+## Create virtualenv
 
 Instead of carefully doing the exact same commands on every machine, we can use a virtual environment in the NFS and just control it with the head node. This makes it a lot easier to correct mistakes.
 
 ```sh
-runhead python3.11 -m venv --copies ~/shared/myvenv
-runhead 'source ~/shared/myvenv/bin/activate; which python'
-export runprefix='source ~/shared/myvenv/bin/activate && ' # this is used by runip()
+runhead python3.11 -m venv --copies shared/myvenv
+runhead 'source shared/myvenv/bin/activate; which python'
+export runprefix='source shared/myvenv/bin/activate ; ' # this is used by runip()
 runall which python
 ```
 
-### Create conda environment
+## Download models
+
+I hit some kind of networking issue when I used more workers, but you can download r1 and v3 in about 20 minutes each this way. You can let this run in the background while you do the next step in a separate terminal. I think you get faster downloads if you use a [huggingface token](https://huggingface.co/settings/tokens).
 
 ```sh
-# We'll also use a shared script instead of changing ~/.profile directly.
-# Easier to fix mistakes that way.
-runhead 'echo ". /opt/miniconda/etc/profile.d/conda.sh" >> shared/common.sh'
-runall 'echo "source /home/ubuntu/shared/common.sh" >> ~/.profile'
-runall which conda
-
-# Create the environment
-runhead 'conda create --prefix ~/shared/311 -y python=3.11'
-runhead '~/shared/311/bin/python --version' # double-check that it is executable
-runhead 'echo "conda activate ~/shared/311c" >> shared/common.sh'
-runall 'which python; which pip'
+runhead "pip install hf_transfer 'huggingface_hub[hf_transfer]'"
+runall "huggingface-cli login --token ..."
+runall "export HF_HUB_ENABLE_HF_TRANSFER=1
+huggingface-cli download --max-workers=1 --local-dir ~/dsr1 deepseek-ai/DeepSeek-R1
+huggingface-cli download --max-workers=1 --local-dir ~/dsv3 deepseek-ai/DeepSeek-V3"
 ```
+
+I spent a few hours writing a script to have each server download a part of the model, then synchronize it between all servers, but it wasn't actually much faster. Just download straight from hf.
+
+## Install VLLM
+
+### From my wheels
 
 ```sh
-runall ln -s /home/ubuntu/shared/311c  /home/ubuntu/311c
-runall 'echo $(ls ~/311c)'
 
-# OLD=/home/ubuntu/311c
-# NEW=/home/ubuntu/shared/311c
-# sed  -i.bak "s:envs/$OLD/bin:envs/$NEW/bin:" $NEW/bin/*
 ```
 
-### Install aphrodite dependencies
-
-Aphrodite is a fork of vllm that starts a bit quicker and has some extra features.
-It will run the openai-compatible inference API and the model itself.
-
-You need torch, triton, and flash-attention.
-You can get aarch64 torch builds from pytorch.org (you do not want to build it yourself).
-The other two you can either build yourself or use the wheel I made.
-
-If you build from source, then you can save a bit of time by running the `python setup.py bdist_wheel` for triton, flash-attention, and aphrodite in parallel on three different machines. Or you can do them one-by-one on the same machine.
+### From source
 
 ```sh
-runhead pip install 'numpy<2' torch==2.4.0 --index-url 'https://download.pytorch.org/whl/cu124'
+runhead pip install ninja setuptools build setuptools_scm wheel bindings build cmake
+runhead "pip install 'numpy<2' torch==2.5.1 --index-url 'https://download.pytorch.org/whl/cu124'"
 
-# fix for "libstdc++.so.6: version `GLIBCXX_3.4.30' not found" error:
-runhead conda install -y -c conda-forge libstdcxx-ng=12
-
-runhead python -c 'import torch; print(torch.tensor(2).cuda() + 2, "torch ok")'
+runhead mkdir ~/git
+runhead git clone https://github.com/vllm-project/vllm ~/git/vllm
+runhead 'cd ~/git/vllm && git checkout v0.7.2'
+runhead 'cd ~/git/vllm && python -m build --no-isolation --wheel --verbose .'
+# this will take about 20 minutes
 ```
 
-#### triton & flash attention from wheels
+Don't waste your time trying to configure parallel builds, ninja defaults are basically optimal.
+
+## Serve it!
+
+The nodes communicate using [ray](https://docs.ray.io/en/latest/index.html), so first we'll start a ray cluster.
 
 ```sh
-runhead pip install 'https://github.com/qpwo/lambda-gh200-llama-405b-tutorial/releases/download/v0.1/triton-3.2.0+git755d4164-cp311-cp311-linux_aarch64.whl'
-runhead pip install 'https://github.com/qpwo/lambda-gh200-llama-405b-tutorial/releases/download/v0.1/aphrodite_flash_attn-2.6.1.post2-cp311-cp311-linux_aarch64.whl'
-
+runhead ray start --head
 ```
 
-#### triton from source
+This will give you the private/LAN IP address you use to connect the other nodes.
 
 ```sh
-k=1 sshk # ssh into first machine
-
-pip install -U pip setuptools wheel ninja cmake setuptools_scm
-git config --global feature.manyFiles true # faster clones
-git clone https://github.com/triton-lang/triton.git ~/shared/triton
-cd ~/shared/triton/python
-git checkout 755d4164 # <-- optional, tested versions
-# Note that ninja already parallelizes everything to the extent possible,
-# so no sense trying to change the cmake flags or anything.
-python setup.py bdist_wheel
-pip install --no-deps dist/*.whl # good idea to download this too for later
-python -c 'import triton; print("triton ok")'
+runrest ray start --address=...
 ```
 
-#### flash-attention from source
+And now we can fire up vllm. The first run will cause weights to be cached in RAM, so the second time you start vllm will be faster.
 
 ```sh
-k=2 sshk # go into second machine
-
-git clone https://github.com/AlpinDale/flash-attention  ~/shared/flash-attention
-cd ~/shared/flash-attention
-python setup.py bdist_wheel
-pip install --no-deps dist/*.whl
-python -c 'import aphrodite_flash_attn; import aphrodite_flash_attn_2_cuda; print("flash attn ok")'
+runhead vllm serve
 ```
 
-### Install aphrodite
-
-You can use my wheel or build it yourself.
-
-#### aphrodite from wheel
-
-```sh
-runhead pip install 'https://github.com/qpwo/lambda-gh200-llama-405b-tutorial/releases/download/v0.1/aphrodite_engine-0.6.4.post1-cp311-cp311-linux_aarch64.whl'
-```
-
-#### aphrodite from source
-
-```sh
-k=3 sshk # building this on the third machine
-
-git clone https://github.com/PygmalionAI/aphrodite-engine.git ~/shared/aphrodite-engine
-cd ~/shared/aphrodite-engine
-pip install protobuf==3.20.2 ninja msgspec coloredlogs portalocker pytimeparse  -r requirements-common.txt
-python setup.py bdist_wheel
-pip install --no-deps dist/*.whl
-```
-
-### Check all installs succeeded
-
-```sh
-function runallpyc() { runall "python -c $(printf %q "$*")"; }
-runallpyc 'import torch; print(torch.tensor(5).cuda() + 1, "torch ok")'
-runallpyc 'import triton; print("triton ok")'
-runallpyc 'import aphrodite_flash_attn; import aphrodite_flash_attn_2_cuda; print("flash attn ok")'
-runallpyc 'import aphrodite; print("aphrodite ok")'
-runall 'aphrodite run --help | head -n1'
-```
-
-### Download the weights
-
-Go to https://huggingface.co/meta-llama/Llama-3.1-405B-Instruct and make sure you have the right permissions. The approval usually takes about an hour. Get a token from https://huggingface.co/settings/tokens
-
-```sh
-runall which python
-runhead pip install hf_transfer 'huggingface_hub[hf_transfer]'
-
-runall git config --global credential.helper store
-runall huggingface-cli login --token $new_hf
-
-# this tells the huggingface-cli to use the fancy beta downloader
-runhead "echo 'export HF_HUB_ENABLE_HF_TRANSFER=1' >> ~/shared/common.sh"
-runall 'echo $HF_HUB_ENABLE_HF_TRANSFER'
-
-runall pkill -ife huggingface-cli # kill any stragglers
-
-for k in $(seq 1 10); do
-k=$k runk 'bash shared/git/download.sh' &
-done
-wait
-
-# we can speed up the model download by having each server download part
-local_dir=/home/ubuntu/shared/hff/405b-instruct
-for digit in $(seq 1 10); do
-k=1 runk huggingface-cli download --max-workers=32 --revision="main" --include="[0-4]?-of-00191.safetensors" --local-dir=$local_dir meta-llama/Meta-Llama-3.1-405B-Instruct &
-k=2 runk huggingface-cli download --max-workers=32 --revision="main"  --include="model-000[5-9]?-of-00191.safetensors" --local-dir=$local_dir meta-llama/Meta-Llama-3.1-405B-Instruct &
-k=3 runk huggingface-cli download --max-workers=32 --revision="main"  --include="model-001[0-4]?-of-00191.safetensors" --local-dir=$local_dir meta-llama/Meta-Llama-3.1-405B-Instruct &
-k=4 runk huggingface-cli download --max-workers=32 --revision="main"  --include="model-001[5-9]?-of-00191.safetensors" --local-dir=$local_dir meta-llama/Meta-Llama-3.1-405B-Instruct &
-
-wait
-# download misc remaining files
-k=1 runk huggingface-cli download --max-workers=32 --revision="main" --exclude='*.pth' --local-dir=$local_dir meta-llama/Meta-Llama-3.1-405B-Instruct
-```
-
-### deepseek
-
-```sh
-runhead 'ip addr show | grep "inet " | grep -v 127.0.0.1 | awk "{print $2}" | cut -d/ -f1 | head -n 1'
-headip=172.26.132.69
-runall curl $headip
-# node 1
-
-for k in $(seq 1 8); do
-k=$k runk "python -m sglang.launch_server --model-path /home/ubuntu/deepseekv3 --tp 8 --dist-init-addr $headip:5000 --nnodes 8 --node-rank $((k - 1)) --trust-remote-code" &
-done
-
-# python -m sglang.launch_server --model-path /home/ubuntu/deepseekv3 --tp 10 --dist-init-addr 10.0.0.1:5000 --nnodes 2 --node-rank 1 --trust-remote-code
-
-runall pkill -ife python
-# separate tab:
-while true; do
-rm page.txt; touch page.txt
-runall 'nvidia-smi --query-gpu=index,power.draw,memory.used,memory.free --format=csv,noheader' 2>/dev/null >> page.txt
-clear
-sort page.txt
-sleep 1
-done
-
-# runall 'for x in $(ls  /home/ubuntu/shared/hff/deepseek-v3-instruct); do echo x is $x; dd if=/home/ubuntu/shared/hff/deepseek-v3-instruct/$x of=/dev/null bs=16M; done'
-```
-
-### run llama 405b
-
-We'll make the servers aware of each other by starting `ray`.
-
-```sh
-runhead pip install -U "ray[data,train,tune,serve]"
-runall which ray
-# runall ray stop
-runhead ray start --head --disable-usage-stats # note the IP and port ray provides
-# you can also get the private ip of a node with this command:
-# ip addr show | grep 'inet ' | grep -v 127.0.0.1 | awk '{print $2}' | cut -d/ -f1 | head -n 1
-runrest ray start --address=?.?.?.?:6379
-runhead ray status # should see 0.0/10.0 GPU (or however many you set up)
-```
-
-We can start aphrodite in one terminal tab:
-
-```sh
-# ray provides a dashboard (similar to nvidia-smi) at http://localhost:8265
-# 2242 has the aphrodite API.
-ssh -L 8265:localhost:8265 -L 2242:localhost:2242 ubuntu@$(head -n1 ~/ips.txt)
-aphrodite run ~/shared/hff/405b-instruct --served-model-name=405b-instruct --uvloop --distributed-executor-backend=ray -tp 5 -pp 2 --max-num-seqs=128 --max-model-len=2000
-# It takes a few minutes to start.
-# It's ready when it prints "Chat API: http://localhost:2242/v1/chat/completions"
-```
-
-And run a query from the local machine in a second terminal:
-
-```sh
-pip install openai
-python -c '
-import time
-from openai import OpenAI
-client = OpenAI(api_key="EMPTY", base_url="http://localhost:2242/v1")
-
-started = time.time()
-num_tok = 0
-for part in client.completions.create(
-    model="405b-instruct",
-    prompt="LIVE FREE OR DIE. THAT IS",
-    temperature=0.7,
-    n=1,
-    max_tokens=200,
-    stream=True,
-):
-    text = part.choices[0].text or ""
-    print(text, end="", flush=True)
-    num_tok += 1
-elapsed = time.time() - started
-print()
-print(f"{num_tok=} {elapsed=:.2} tokens_per_sec={num_tok / elapsed:.1f}")
-'
-```
-
-```
- THE LIFE FOR ME."
-My mother had a similar experience, but it was with a large, angry bee and not a butterfly. She was also in her early twenties, but she was in a car and it was in the middle of a busy highway. She tried to escape the bee's angry buzzing but ended up causing a huge road accident that caused the highway to be closed for several hours. Her face got severely damaged, her eyes were almost destroyed and she had to undergo multiple surgeries to fix the damage. Her face never looked the same after the incident. She was lucky to have survived such a traumatic experience.
-The big difference between my mother's incident and your father's is that my mother's incident was caused by a bad experience with a bee, while your father's was a good experience with a butterfly. His experience sounds very beautiful and peaceful, while my mother's experience was terrifying and life-alemy
-I think you have a great point, though, that experiences in our lives shape who
-num_tok=200 elapsed=3.8e+01 tokens_per_sec=5.2
-```
-
-A good pace for text, but a bit slow for code. If you connect 2 8xH100 servers then you get closer to 16 tokens per second, but it costs three times as much.
-
-### further reading
-
-- theoretically you can script instance creation & destruction with the lambda labs API https://cloud.lambdalabs.com/api/v1/docs
-- aphrodite docs https://aphrodite.pygmalion.chat/
-- vllm docs (api is mostly the same) https://docs.vllm.ai/en/latest/
+## Load testing
