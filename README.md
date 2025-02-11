@@ -290,3 +290,9 @@ curl http://localhost:8000/v1/models -H "Authorization: Bearer asdf1234"
 # ray dashboard to view VRAM utilization:
 open http://localhost:8265/#/cluster
 ```
+
+
+
+https://github.com/user-attachments/assets/5c27abe9-9168-4f6a-88aa-8ffa22c348b1
+
+
