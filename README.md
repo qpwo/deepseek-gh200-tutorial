@@ -283,4 +283,10 @@ python3 -m http.server 1234
 
 # on your desktop:
 open http://localhost:1234/load-test.html
+
+# check if api is up:
+curl http://localhost:8000/v1/models -H "Authorization: Bearer asdf1234"
+
+# ray dashboard to view VRAM utilization:
+open http://localhost:8265/#/cluster
 ```
