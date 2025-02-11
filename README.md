@@ -237,7 +237,7 @@ runall "vllm --help | tail -n1" # slow first time, fast second time
 The nodes communicate using [ray](https://docs.ray.io/en/latest/index.html), so first we'll start a ray cluster.
 
 ```sh
-runall "ray stop; pkill -ife py"
+runall "ray stop; ray stop; pkill -ife py"
 runall 'nvidia-smi --query-gpu=index,power.draw,memory.used,memory.free --format=csv,noheader'
 # This will give you the private/LAN IP address you use to connect the other nodes:
 runhead ray start --head
