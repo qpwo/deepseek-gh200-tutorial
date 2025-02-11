@@ -259,6 +259,8 @@ runhead 'vllm serve ~/dsr1 \
     --uvicorn-log-level=info \
     --max-num-seqs=64 \
     --max-model-len=8000'
+# wait until you see:
+# INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 ```
 
 ## Load testing
