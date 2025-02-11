@@ -80,6 +80,7 @@
           messages: [{ role: 'user', content: prompt }],
           stream: true,
           max_tokens: maxTokens, // Corrected: Use max_tokens
+          baseUrl: 'http://localhost:8000',
         })
         for await (const chunk of stream) {
           yield chunk.choices[0]?.delta?.content || ''
