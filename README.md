@@ -238,6 +238,7 @@ The nodes communicate using [ray](https://docs.ray.io/en/latest/index.html), so 
 
 ```sh
 runall "ray stop; pkill -ife py"
+runall 'nvidia-smi --query-gpu=index,power.draw,memory.used,memory.free --format=csv,noheader'
 # This will give you the private/LAN IP address you use to connect the other nodes:
 runhead ray start --head
 # Use the output from above:
@@ -249,16 +250,18 @@ And now we can fire up vllm. The first run will cause weights to be cached in RA
 
 ```sh
 # 2-8 minutes to start:
-runhead 'vllm serve ~/dsr1 \
+model=dsr1
+# model=dsv3
+runhead "vllm serve ~/$model \
     --api-key asdf1234 \
-    --served-model-name dsr1 \
+    --served-model-name $model \
     --trust-remote-code \
     --pipeline-parallel-size=4 \
     --tensor-parallel-size=4 \
     --enable-prefix-caching \
     --uvicorn-log-level=info \
     --max-num-seqs=64 \
-    --max-model-len=8000'
+    --max-model-len=8000"
 # wait until you see:
 # INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 ```
