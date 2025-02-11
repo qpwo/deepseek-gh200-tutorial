@@ -1,6 +1,6 @@
 # Serving deepseek r1 & v3 on GH200s
 
-Lambda labs still has half-off GH200s as a promotion to get more people used to the ARM tooling. I [previously](https://dev.to/qpwo/how-to-run-llama-405b-bf16-with-gh200s-7da) wrote a tutorial for running llama 405b, but deepseek r1 is clearly a better model, so let's serve it instead. There's a couple differences from serving llama:
+Lambda labs still has half-off (ie $1.50) GH200s as a promotion to get more people used to the ARM tooling. I [previously](https://dev.to/qpwo/how-to-run-llama-405b-bf16-with-gh200s-7da) wrote a tutorial for running llama 405b, but deepseek r1 is clearly a better model, so let's serve it instead. There's a couple differences from serving llama:
 
 - You need 12 or 16 GPUs to have decent throughput. You can still use 8 if you don't need much throughput.
 - VLLM works better than aphrodite for deepseek right now. In fact they just released an [update](https://github.com/vllm-project/vllm/releases/tag/v0.7.2) that makes deepseek inference quite a bit faster. Roughly a 40% throughput improvement.
@@ -163,17 +163,23 @@ I hit some kind of networking issue when I used more workers, but you can downlo
 runhead "pip install hf_transfer 'huggingface_hub[hf_transfer]'"
 runall "huggingface-cli login --token ..."
 runall "export HF_HUB_ENABLE_HF_TRANSFER=1
-huggingface-cli download --max-workers=1 --local-dir ~/dsr1 deepseek-ai/DeepSeek-R1
-huggingface-cli download --max-workers=1 --local-dir ~/dsv3 deepseek-ai/DeepSeek-V3"
+    huggingface-cli download --max-workers=1 --local-dir ~/dsr1 deepseek-ai/DeepSeek-R1
+    huggingface-cli download --max-workers=1 --local-dir ~/dsv3 deepseek-ai/DeepSeek-V3"
+# if you need to restart:
+pkill -ife 192.222
+runall pkill -ife hugg
 ```
 
 I spent a few hours writing a script to have each server download a part of the model, then synchronize it between all servers, but it wasn't actually much faster. Just download straight from hf.
 
 ## Install VLLM
 
+You can build from source if you prefer, or use my wheels.
+
 ### From my wheels
 
 ```sh
+runhead "pip install --force-reinstall 'numpy<2' torch==2.5.1 torchvision --index-url 'https://download.pytorch.org/whl/cu124'"
 
 ```
 
@@ -181,16 +187,29 @@ I spent a few hours writing a script to have each server download a part of the 
 
 ```sh
 runhead pip install ninja setuptools build setuptools_scm wheel bindings build cmake
-runhead "pip install 'numpy<2' torch==2.5.1 --index-url 'https://download.pytorch.org/whl/cu124'"
+runhead "pip install --force-reinstall 'numpy<2' torch==2.5.1 torchvision --index-url 'https://download.pytorch.org/whl/cu124'"
 
 runhead mkdir ~/git
 runhead git clone https://github.com/vllm-project/vllm ~/git/vllm
 runhead 'cd ~/git/vllm && git checkout v0.7.2'
+# this will take about 20 minutes:
 runhead 'cd ~/git/vllm && python -m build --no-isolation --wheel --verbose .'
-# this will take about 20 minutes
+runhead 'pip install -v git/vllm/dist/*.whl'
+# may have to run torch install command again
 ```
 
-Don't waste your time trying to configure parallel builds, ninja defaults are basically optimal.
+Don't waste your time trying to configure parallel builds, ninja defaults are basically optimal. It's a good idea to save the wheel for next time.
+
+```sh
+scp -i ~/.ssh/lambda_id_ed25519 ubuntu@192.222.57.225:/home/ubuntu/git/vllm/dist/* ~/Downloads/
+```
+
+### Check install
+
+```sh
+runall "python -c 'import torch; print(torch.tensor(2).cuda() + 2)'"
+runall "vllm --help | tail -n1" # slow first time, fast second time
+```
 
 ## Serve it!
 
