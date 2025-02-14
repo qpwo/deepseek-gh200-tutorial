@@ -4,8 +4,12 @@ import time
 import argparse
 import asyncio
 from typing import List
+import random
 
 rw = RandomWords()
+wordos = list(rw.service.valid_words.keys())
+def get_random_words(num_words: int) -> str:
+    return " ".join(wordos[random.randrange(0, len(wordos))] for _ in range(num_words))
 
 async def run_prompt(model: str, prompt: str, max_tokens: int):
     """Generates text from the OpenAI API, handling streaming and errors.
@@ -92,7 +96,7 @@ async def process_batch(model: str, batch_size: int, num_input_words: int, max_t
     print(f"Batch Size: {batch_size}")
 
     prompts = [
-        "Tell a story inspired by these words: " + " ".join(rw.get_random_word() for _ in range(num_input_words))
+        "Tell a story inspired by these words: " + get_random_words(num_input_words)
         for _ in range(batch_size)
     ]
 
@@ -117,14 +121,18 @@ async def process_batch(model: str, batch_size: int, num_input_words: int, max_t
     end_time = time.time()
     duration = end_time - start_time
 
-    print(f"Completed {completed_count} / {batch_size} requests in {duration:.2f} seconds.")
-    print(f"Total Prompt Tokens: {total_prompt_tokens}")
-    print(f"Total Completion Tokens: {total_completion_tokens}")
-    print(f"Prompt rate: {(total_prompt_tokens / duration):.2f} tokens/second")
-    print(f"Prompt rate per input: {(total_prompt_tokens / duration / batch_size):.2f} tokens/second")
-    print(f"Completion rate: {(total_completion_tokens / duration):.2f} tokens/second")
-    print(f"Completion rate per input: {(total_completion_tokens / duration / batch_size):.2f} tokens/second")
-    print("-" * 20)
+    import sys
+    fa = open('load.log', 'a')
+    for f in [sys.stdout, fa]:
+        print(f"Completed {completed_count} / {batch_size} requests in {duration:.2f} seconds.", file=f)
+        print(f"Total Prompt Tokens: {total_prompt_tokens}", file=f)
+        print(f"Total Completion Tokens: {total_completion_tokens}", file=f)
+        print(f"Prompt rate: {(total_prompt_tokens / duration):.2f} tokens/second", file=f)
+        print(f"Prompt rate per input: {(total_prompt_tokens / duration / batch_size):.2f} tokens/second", file=f)
+        print(f"Completion rate: {(total_completion_tokens / duration):.2f} tokens/second", file=f)
+        print(f"Completion rate per input: {(total_completion_tokens / duration / batch_size):.2f} tokens/second", file=f)
+        print("-" * 20, file=f)
+    fa.close()
 
 
 async def main():
